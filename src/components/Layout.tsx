@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Home,
   FolderKanban,
@@ -8,8 +8,11 @@ import {
   LogOut,
   Menu,
   X,
+  ChevronDown,
 } from 'lucide-react';
+import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { getInitials } from '../lib/utils';
 import { ShelleyWordmark } from './Logo';
 import type { PageKey } from '../contexts/NavigationContext';
 
@@ -77,13 +80,7 @@ export function Layout({
                   </button>
                 );
               })}
-              <button
-                onClick={() => signOut()}
-                className="ml-2 flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-100 hover:text-gray-900"
-              >
-                <LogOut className="h-4 w-4" />
-                Sign Out
-              </button>
+              <UserMenu />
             </div>
 
             {/* Mobile toggle */}
@@ -133,6 +130,63 @@ export function Layout({
       </nav>
 
       <main className="mx-auto max-w-7xl px-4 py-6">{children}</main>
+    </div>
+  );
+}
+
+function UserMenu() {
+  const { user, signOut } = useAuth();
+  const [displayName, setDisplayName] = useState('');
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    supabase
+      .from('user_profiles')
+      .select('display_name')
+      .eq('id', user.id)
+      .maybeSingle()
+      .then(({ data }) => setDisplayName(data?.display_name ?? ''));
+  }, [user]);
+
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, []);
+
+  const name = displayName || user?.email || 'Account';
+  const email = user?.email ?? '';
+
+  return (
+    <div ref={ref} className="relative ml-2">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 rounded-full py-1 pl-1 pr-2 transition hover:bg-gray-100"
+      >
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">
+          {getInitials(name)}
+        </span>
+        <ChevronDown className="h-4 w-4 text-gray-500" />
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-2 w-56 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+          <div className="border-b border-gray-100 px-4 py-3">
+            <p className="truncate text-sm font-medium text-gray-900">{name}</p>
+            {email && <p className="truncate text-xs text-gray-400">{email}</p>}
+          </div>
+          <button
+            onClick={() => signOut()}
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            <LogOut className="h-4 w-4" />
+            Sign Out
+          </button>
+        </div>
+      )}
     </div>
   );
 }

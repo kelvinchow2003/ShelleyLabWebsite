@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RotateCcw, Download } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { RowsSkeleton } from '../components/Skeleton';
 import { formatDate } from '../lib/utils';
+import { exportCsv, dateStamp } from '../lib/csv';
 import type { AdminLog, UserProfile } from '../lib/database.types';
 
 const PAGE_SIZE = 25;
@@ -77,9 +78,38 @@ export function ActivityLog() {
     setPage(0);
   }
 
+  function handleExport() {
+    const rows = filtered.map((log) => {
+      const u = log.user_id ? users.get(log.user_id) : null;
+      return {
+        user: u ? u.display_name || u.email : 'System',
+        action: log.action,
+        entity_type: log.entity_type,
+        entity_id: log.entity_id ?? '',
+        timestamp: formatDate(log.created_at),
+      };
+    });
+    if (rows.length === 0) return;
+    exportCsv(`activity-log-${dateStamp()}`, rows, [
+      { key: 'user', label: 'User' },
+      { key: 'action', label: 'Action' },
+      { key: 'entity_type', label: 'Entity Type' },
+      { key: 'entity_id', label: 'Entity ID' },
+      { key: 'timestamp', label: 'Timestamp' },
+    ]);
+  }
+
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Activity Log</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-gray-900">Activity Log</h1>
+        <button
+          onClick={handleExport}
+          className="flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          <Download className="h-4 w-4" /> Export CSV
+        </button>
+      </div>
 
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
         <label className="text-xs font-medium text-gray-500">

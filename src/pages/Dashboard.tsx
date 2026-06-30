@@ -5,82 +5,173 @@ import {
   Package,
   Plus,
   ListChecks,
+  Activity,
+  Clock,
 } from 'lucide-react';
-import { Skeleton } from '../components/Skeleton';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Label,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+} from 'recharts';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigation } from '../contexts/NavigationContext';
 import { StatusBadge } from '../components/Modal';
+import { Skeleton } from '../components/Skeleton';
 import {
   formatDate,
   getStatusColor,
   formatStatusLabel,
   isLoanOverdue,
+  PROJECT_STATUSES,
 } from '../lib/utils';
-import type { Project, EquipmentLoan } from '../lib/database.types';
+import type { Project, EquipmentLoan, ProjectStatus } from '../lib/database.types';
 
 interface LoanWithMeta extends EquipmentLoan {
   equipment_name: string;
   lab_name: string;
 }
 
+const STATUS_HEX: Record<ProjectStatus, string> = {
+  pending: '#eab308',
+  in_progress: '#3b82f6',
+  complete: '#22c55e',
+  cancelled: '#ef4444',
+  not_feasible: '#9ca3af',
+};
+
 export function Dashboard() {
   const { user } = useAuth();
   const { navigateTo } = useNavigation();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loans, setLoans] = useState<LoanWithMeta[]>([]);
+  const [statusCounts, setStatusCounts] = useState<Record<ProjectStatus, number>>({
+    pending: 0,
+    in_progress: 0,
+    complete: 0,
+    cancelled: 0,
+    not_feasible: 0,
+  });
+  const [totalProjects, setTotalProjects] = useState(0);
+  const [activeLoanCount, setActiveLoanCount] = useState(0);
+  const [overdueCount, setOverdueCount] = useState(0);
+  const [loansPerMonth, setLoansPerMonth] = useState<{ month: string; loans: number }[]>(
+    []
+  );
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       if (!user) return;
 
-      // My active projects: ones I'm assigned to OR ones I created, pending/in_progress.
+      // My active projects: assigned to me OR created by me, pending/in_progress.
       const { data: assignments } = await supabase
         .from('project_assignments')
         .select('project_id')
         .eq('user_id', user.id);
       const assignedIds = (assignments ?? []).map((a) => a.project_id);
 
-      const [assignedRes, createdRes] = await Promise.all([
-        assignedIds.length
-          ? supabase
-              .from('projects')
-              .select('*')
-              .in('id', assignedIds)
-              .in('status', ['pending', 'in_progress'])
-          : Promise.resolve({ data: [] as Project[] }),
-        supabase
-          .from('projects')
-          .select('*')
-          .eq('created_by', user.id)
-          .in('status', ['pending', 'in_progress']),
-      ]);
+      const [assignedRes, createdRes, allStatusRes, allLoansRes, activeLoansRes] =
+        await Promise.all([
+          assignedIds.length
+            ? supabase
+                .from('projects')
+                .select('*')
+                .in('id', assignedIds)
+                .in('status', ['pending', 'in_progress'])
+            : Promise.resolve({ data: [] as Project[] }),
+          supabase
+            .from('projects')
+            .select('*')
+            .eq('created_by', user.id)
+            .in('status', ['pending', 'in_progress']),
+          supabase.from('projects').select('status'),
+          supabase
+            .from('equipment_loans')
+            .select('id,status,expected_return_date,actual_return_date,created_at'),
+          supabase
+            .from('equipment_loans')
+            .select('*')
+            .eq('status', 'borrowing')
+            .order('expected_return_date', { ascending: true })
+            .limit(5),
+        ]);
 
       const merged = new Map<string, Project>();
       for (const p of [...(assignedRes.data ?? []), ...(createdRes.data ?? [])]) {
         merged.set(p.id, p);
       }
-      const myProjects = [...merged.values()]
-        .sort(
-          (a, b) =>
-            new Date(b.submitted_date).getTime() - new Date(a.submitted_date).getTime()
-        )
-        .slice(0, 5);
-      setProjects(myProjects);
+      setProjects(
+        [...merged.values()]
+          .sort(
+            (a, b) =>
+              new Date(b.submitted_date).getTime() - new Date(a.submitted_date).getTime()
+          )
+          .slice(0, 5)
+      );
 
-      // Active equipment loans (borrowing)
-      const { data: loanRows } = await supabase
-        .from('equipment_loans')
-        .select('*')
-        .eq('status', 'borrowing')
-        .order('expected_return_date', { ascending: true })
-        .limit(5);
+      // Status breakdown + total.
+      const counts: Record<ProjectStatus, number> = {
+        pending: 0,
+        in_progress: 0,
+        complete: 0,
+        cancelled: 0,
+        not_feasible: 0,
+      };
+      for (const row of allStatusRes.data ?? []) {
+        const s = row.status as ProjectStatus;
+        if (s in counts) counts[s]++;
+      }
+      setStatusCounts(counts);
+      setTotalProjects((allStatusRes.data ?? []).length);
 
-      const loanList = loanRows ?? [];
+      // Loan metrics.
+      const allLoans = allLoansRes.data ?? [];
+      let active = 0;
+      let overdue = 0;
+      for (const l of allLoans) {
+        const returned = l.status === 'returned' || !!l.actual_return_date;
+        if (!returned) {
+          active++;
+          if (isLoanOverdue(l.expected_return_date, l.actual_return_date, l.status))
+            overdue++;
+        }
+      }
+      setActiveLoanCount(active);
+      setOverdueCount(overdue);
+
+      // Loans per month (last 6 months).
+      const months: { key: string; label: string; loans: number }[] = [];
+      const now = new Date();
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months.push({
+          key: `${d.getFullYear()}-${d.getMonth()}`,
+          label: d.toLocaleDateString('en-US', { month: 'short' }),
+          loans: 0,
+        });
+      }
+      const monthIndex = new Map(months.map((m, i) => [m.key, i]));
+      for (const l of allLoans) {
+        const d = new Date(l.created_at);
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        const idx = monthIndex.get(key);
+        if (idx !== undefined) months[idx].loans++;
+      }
+      setLoansPerMonth(months.map((m) => ({ month: m.label, loans: m.loans })));
+
+      // Decorate the active-loan list with names.
+      const loanList = activeLoansRes.data ?? [];
       const equipmentIds = [...new Set(loanList.map((l) => l.equipment_id))];
       const labIds = [...new Set(loanList.map((l) => l.lab_id).filter(Boolean))] as string[];
-
       const [eqRes, labRes] = await Promise.all([
         equipmentIds.length
           ? supabase.from('equipment').select('id,name').in('id', equipmentIds)
@@ -91,7 +182,6 @@ export function Dashboard() {
       ]);
       const eqMap = new Map((eqRes.data ?? []).map((e) => [e.id, e.name]));
       const labMap = new Map((labRes.data ?? []).map((l) => [l.id, l.name]));
-
       setLoans(
         loanList.map((l) => ({
           ...l,
@@ -99,6 +189,7 @@ export function Dashboard() {
           lab_name: l.lab_id ? labMap.get(l.lab_id) ?? '—' : '—',
         }))
       );
+
       setLoading(false);
     }
     load();
@@ -108,15 +199,25 @@ export function Dashboard() {
     isLoanOverdue(l.expected_return_date, l.actual_return_date, l.status)
   );
 
+  const donutData = PROJECT_STATUSES.map((s) => ({
+    name: formatStatusLabel(s),
+    value: statusCounts[s],
+    status: s,
+  })).filter((d) => d.value > 0);
+
   if (loading) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-8 w-48" />
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Skeleton className="h-56 w-full" />
-          <Skeleton className="h-56 w-full" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-24 w-full" />
+          ))}
         </div>
-        <Skeleton className="h-28 w-full" />
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Skeleton className="h-64 w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
       </div>
     );
   }
@@ -129,6 +230,38 @@ export function Dashboard() {
           Welcome back{user?.email ? `, ${user.email}` : ''}. Here&apos;s what&apos;s
           active.
         </p>
+      </div>
+
+      {/* KPI cards */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <KpiCard
+          label="Total Projects"
+          value={totalProjects}
+          icon={<FolderKanban className="h-5 w-5" />}
+          tone="blue"
+          onClick={() => navigateTo('projects')}
+        />
+        <KpiCard
+          label="In Progress"
+          value={statusCounts.in_progress}
+          icon={<Activity className="h-5 w-5" />}
+          tone="indigo"
+          onClick={() => navigateTo('projects')}
+        />
+        <KpiCard
+          label="Active Loans"
+          value={activeLoanCount}
+          icon={<Package className="h-5 w-5" />}
+          tone="green"
+          onClick={() => navigateTo('equipment')}
+        />
+        <KpiCard
+          label="Overdue"
+          value={overdueCount}
+          icon={<Clock className="h-5 w-5" />}
+          tone={overdueCount > 0 ? 'red' : 'gray'}
+          onClick={() => navigateTo('equipment')}
+        />
       </div>
 
       {overdueLoans.length > 0 && (
@@ -151,8 +284,57 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* Charts */}
       <div className="grid gap-6 lg:grid-cols-2">
-        {/* My Active Projects */}
+        <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+          <h2 className="mb-4 font-semibold text-gray-900">Projects by Status</h2>
+          {donutData.length === 0 ? (
+            <p className="py-12 text-center text-sm text-gray-400">No projects yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie
+                  data={donutData}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={55}
+                  outerRadius={85}
+                  paddingAngle={2}
+                  label={({ name, value }) => `${name}: ${value}`}
+                  labelLine={true}
+                >
+                  {donutData.map((d) => (
+                    <Cell key={d.status} fill={STATUS_HEX[d.status]} />
+                  ))}
+                  <Label
+                    value={totalProjects}
+                    position="center"
+                    className="fill-gray-900"
+                    style={{ fontSize: 26, fontWeight: 700 }}
+                  />
+                </Pie>
+                <Tooltip />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+          <h2 className="mb-4 font-semibold text-gray-900">Loans (last 6 months)</h2>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={loansPerMonth}>
+              <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
+              <YAxis allowDecimals={false} tickLine={false} axisLine={false} fontSize={12} />
+              <Tooltip cursor={{ fill: '#f3f4f6' }} />
+              <Bar dataKey="loans" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </section>
+      </div>
+
+      {/* Lists */}
+      <div className="grid gap-6 lg:grid-cols-2">
         <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="flex items-center gap-2 font-semibold text-gray-900">
@@ -176,10 +358,7 @@ export function Dashboard() {
           ) : (
             <ul className="space-y-3">
               {projects.map((p) => (
-                <li
-                  key={p.id}
-                  className="rounded-md border border-gray-100 bg-gray-50 p-3"
-                >
+                <li key={p.id} className="rounded-md border border-gray-100 bg-gray-50 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-medium text-gray-900">{p.project_name}</span>
                     <StatusBadge
@@ -189,9 +368,7 @@ export function Dashboard() {
                   </div>
                   <div className="mt-1 flex items-center gap-2 text-xs text-gray-500">
                     <span>{p.company}</span>
-                    {p.is_urgent && (
-                      <span className="font-semibold text-red-600">Urgent</span>
-                    )}
+                    {p.is_urgent && <span className="font-semibold text-red-600">Urgent</span>}
                     <span>· {formatDate(p.submitted_date, false)}</span>
                   </div>
                 </li>
@@ -200,7 +377,6 @@ export function Dashboard() {
           )}
         </section>
 
-        {/* Active Equipment Loans */}
         <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="flex items-center gap-2 font-semibold text-gray-900">
@@ -233,19 +409,13 @@ export function Dashboard() {
                   <li
                     key={l.id}
                     className={`rounded-md border p-3 ${
-                      overdue
-                        ? 'border-red-200 bg-red-50'
-                        : 'border-gray-100 bg-gray-50'
+                      overdue ? 'border-red-200 bg-red-50' : 'border-gray-100 bg-gray-50'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium text-gray-900">
-                        {l.equipment_name}
-                      </span>
+                      <span className="font-medium text-gray-900">{l.equipment_name}</span>
                       {overdue && (
-                        <span className="text-xs font-semibold text-red-600">
-                          Overdue!
-                        </span>
+                        <span className="text-xs font-semibold text-red-600">Overdue!</span>
                       )}
                     </div>
                     <div className="mt-1 text-xs text-gray-500">
@@ -282,6 +452,44 @@ export function Dashboard() {
         </div>
       </section>
     </div>
+  );
+}
+
+const TONES: Record<string, { bg: string; text: string; ring: string }> = {
+  blue: { bg: 'bg-blue-50', text: 'text-blue-600', ring: 'hover:border-blue-300' },
+  indigo: { bg: 'bg-indigo-50', text: 'text-indigo-600', ring: 'hover:border-indigo-300' },
+  green: { bg: 'bg-green-50', text: 'text-green-600', ring: 'hover:border-green-300' },
+  red: { bg: 'bg-red-50', text: 'text-red-600', ring: 'hover:border-red-300' },
+  gray: { bg: 'bg-gray-50', text: 'text-gray-500', ring: 'hover:border-gray-300' },
+};
+
+function KpiCard({
+  label,
+  value,
+  icon,
+  tone,
+  onClick,
+}: {
+  label: string;
+  value: number;
+  icon: React.ReactNode;
+  tone: keyof typeof TONES;
+  onClick?: () => void;
+}) {
+  const t = TONES[tone];
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-4 rounded-lg border border-gray-200 bg-white p-4 text-left shadow-sm transition hover:shadow-md ${t.ring}`}
+    >
+      <span className={`flex h-11 w-11 items-center justify-center rounded-lg ${t.bg} ${t.text}`}>
+        {icon}
+      </span>
+      <span>
+        <span className="block text-2xl font-bold text-gray-900">{value}</span>
+        <span className="block text-sm text-gray-500">{label}</span>
+      </span>
+    </button>
   );
 }
 

@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   Package,
   Loader2,
+  Download as DownloadIcon,
 } from 'lucide-react';
 import { supabase, EQUIPMENT_LOAN_FILES_BUCKET } from '../lib/supabase';
 import { EquipmentLoanForm } from '../components/EquipmentLoanForm';
@@ -17,6 +18,7 @@ import { RowsSkeleton, EmptyState } from '../components/Skeleton';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate, getStatusColor, isLoanOverdue, getSignedUrl } from '../lib/utils';
 import { adjustInventory } from '../lib/inventory';
+import { exportCsv, dateStamp } from '../lib/csv';
 import type {
   EquipmentLoan,
   EquipmentLoanFile,
@@ -280,6 +282,43 @@ function LoansView({ toast }: { toast: ReturnType<typeof useToast> }) {
     else toast.error('Could not generate download link');
   }
 
+  function handleExport() {
+    const filtered = loans.filter((l) => {
+      if (statusFilter !== 'all' && effectiveStatus(l) !== statusFilter) return false;
+      if (labFilter !== 'all' && l.lab_id !== labFilter) return false;
+      return true;
+    });
+    const rows = filtered.map((l) => ({
+      contact_name: l.contact_name,
+      contact_email: l.contact_email,
+      contact_phone: l.contact_phone,
+      equipment: l.equipment_name,
+      lab: l.lab_name,
+      quantity: l.quantity_borrowed,
+      status: effectiveStatus(l),
+      expected_return: l.expected_return_date,
+      actual_return: l.actual_return_date ?? '',
+      loaned_on: formatDate(l.created_at, false),
+    }));
+    if (rows.length === 0) {
+      toast.info('No loans match the current filters');
+      return;
+    }
+    exportCsv(`equipment-loans-${dateStamp()}`, rows, [
+      { key: 'contact_name', label: 'Contact' },
+      { key: 'contact_email', label: 'Email' },
+      { key: 'contact_phone', label: 'Phone' },
+      { key: 'equipment', label: 'Equipment' },
+      { key: 'lab', label: 'Lab' },
+      { key: 'quantity', label: 'Quantity' },
+      { key: 'status', label: 'Status' },
+      { key: 'expected_return', label: 'Expected Return' },
+      { key: 'actual_return', label: 'Actual Return' },
+      { key: 'loaned_on', label: 'Loaned On' },
+    ]);
+    toast.success(`Exported ${rows.length} loan${rows.length === 1 ? '' : 's'}`);
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
@@ -313,12 +352,20 @@ function LoansView({ toast }: { toast: ReturnType<typeof useToast> }) {
             </select>
           </label>
         </div>
-        <button
-          onClick={() => setShowForm(true)}
-          className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-        >
-          <Plus className="h-4 w-4" /> New Loan
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExport}
+            className="flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <DownloadIcon className="h-4 w-4" /> Export CSV
+          </button>
+          <button
+            onClick={() => setShowForm(true)}
+            className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+          >
+            <Plus className="h-4 w-4" /> New Loan
+          </button>
+        </div>
       </div>
 
       {loading ? (

@@ -1,32 +1,74 @@
 import { useState, type FormEvent } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, FolderKanban, Package, BarChart3 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { ShelleyMark } from './Logo';
+
+const FEATURES = [
+  { icon: FolderKanban, text: 'Track projects across all five labs' },
+  { icon: Package, text: 'Manage equipment loans & live inventory' },
+  { icon: BarChart3, text: 'Full audit trail and analytics dashboard' },
+];
 
 export function AuthPage() {
   const [mode, setMode] = useState<'login' | 'signup'>('login');
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-gray-100 p-4">
-      <div className="w-full max-w-md">
-        <div className="mb-8 flex flex-col items-center text-center">
-          <div className="mb-3 flex h-16 w-16 items-center justify-center rounded-xl bg-white shadow-lg ring-1 ring-gray-100">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-gray-100">
+      <div className="mx-auto flex min-h-screen max-w-5xl flex-col items-center justify-center gap-10 p-6 lg:flex-row lg:gap-20">
+        {/* Hero panel (desktop) */}
+        <div className="hidden max-w-md flex-1 lg:block">
+          <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-white shadow-lg ring-1 ring-gray-100">
             <ShelleyMark className="h-11 w-11" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">
+          <h1 className="text-4xl font-bold leading-tight text-gray-900">
             <span className="text-slate-700">Shelley</span>
             <span className="font-medium text-gray-400">Automation</span>
-            <span className="ml-1 text-blue-600">Lab</span>
+            <span className="text-blue-600"> Lab</span>
           </h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Internal project &amp; equipment management
+          <p className="mt-3 text-lg text-gray-500">
+            The internal hub for lab projects and equipment — organized, auditable,
+            always up to date.
+          </p>
+          <ul className="mt-8 space-y-3">
+            {FEATURES.map((f) => {
+              const Icon = f.icon;
+              return (
+                <li key={f.text} className="flex items-center gap-3 text-gray-700">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+                    <Icon className="h-5 w-5" />
+                  </span>
+                  {f.text}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+
+        {/* Form column */}
+        <div className="w-full max-w-md flex-1">
+          {/* Compact brand (mobile only) */}
+          <div className="mb-8 flex flex-col items-center text-center lg:hidden">
+            <div className="mb-3 flex h-16 w-16 items-center justify-center rounded-xl bg-white shadow-lg ring-1 ring-gray-100">
+              <ShelleyMark className="h-11 w-11" />
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">
+              <span className="text-slate-700">Shelley</span>
+              <span className="font-medium text-gray-400">Automation</span>
+              <span className="ml-1 text-blue-600">Lab</span>
+            </h1>
+            <p className="mt-1 text-sm text-gray-500">
+              Internal project &amp; equipment management
+            </p>
+          </div>
+          {mode === 'login' ? (
+            <LoginCard onSwitch={() => setMode('signup')} />
+          ) : (
+            <SignUpCard onSwitch={() => setMode('login')} />
+          )}
+          <p className="mt-6 text-center text-xs text-gray-400">
+            Shelley Automation · Internal use only
           </p>
         </div>
-        {mode === 'login' ? (
-          <LoginCard onSwitch={() => setMode('signup')} />
-        ) : (
-          <SignUpCard onSwitch={() => setMode('login')} />
-        )}
       </div>
     </div>
   );

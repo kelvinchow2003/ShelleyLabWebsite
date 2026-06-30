@@ -9,10 +9,14 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderKanban,
+  Download,
+  List,
+  LayoutGrid,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
+import { exportCsv, dateStamp } from '../lib/csv';
 import { ProjectForm } from '../components/ProjectForm';
 import { Modal } from '../components/Modal';
 import { CardGridSkeleton, EmptyState } from '../components/Skeleton';
@@ -33,7 +37,9 @@ import type {
 } from '../lib/database.types';
 
 type SortKey = 'submitted_date' | 'title' | 'status' | 'priority';
+type ViewMode = 'list' | 'grid';
 const PAGE_SIZE = 12;
+const VIEW_STORAGE_KEY = 'projects_view';
 
 const SORT_COLUMN: Record<SortKey, string> = {
   submitted_date: 'submitted_date',
@@ -79,6 +85,16 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
   const [sortKey, setSortKey] = useState<SortKey>('submitted_date');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [page, setPage] = useState(0);
+
+  // View mode (list = default), persisted across sessions.
+  const [view, setView] = useState<ViewMode>(() => {
+    const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+    return saved === 'grid' ? 'grid' : 'list';
+  });
+  function changeView(v: ViewMode) {
+    setView(v);
+    localStorage.setItem(VIEW_STORAGE_KEY, v);
+  }
 
   // Debounce the search input.
   useEffect(() => {
@@ -242,6 +258,55 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
     }
   }
 
+  async function handleExport() {
+    let query = supabase.from('projects').select('*');
+    if (statusFilter !== 'all') query = query.eq('status', statusFilter);
+    if (labFilter !== 'all') query = query.eq('lab_id', labFilter);
+    if (priorityFilter === 'urgent') query = query.eq('is_urgent', true);
+    if (priorityFilter === 'not-urgent') query = query.eq('is_urgent', false);
+    if (tagFilter !== 'all') query = query.contains('tags', [tagFilter]);
+    if (debouncedSearch.trim()) {
+      const q = debouncedSearch.trim().replace(/[%,]/g, ' ');
+      query = query.or(
+        `project_name.ilike.%${q}%,company.ilike.%${q}%,description.ilike.%${q}%`
+      );
+    }
+    query = query.order(SORT_COLUMN[sortKey], { ascending: sortOrder === 'asc' });
+
+    const { data, error } = await query;
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    const rows = (data ?? []).map((p) => ({
+      project_name: p.project_name,
+      company: p.company,
+      status: formatStatusLabel(p.status),
+      lab: p.lab_id ? labMap.get(p.lab_id) ?? '' : '',
+      application_type: p.application_type_id ? appTypes.get(p.application_type_id) ?? '' : '',
+      sales_rep: p.sales_rep_id ? salesReps.get(p.sales_rep_id) ?? '' : '',
+      urgent: p.is_urgent ? 'Yes' : 'No',
+      tags: p.tags.join('; '),
+      submitted_date: formatDate(p.submitted_date),
+    }));
+    if (rows.length === 0) {
+      toast.info('No projects match the current filters');
+      return;
+    }
+    exportCsv(`projects-${dateStamp()}`, rows, [
+      { key: 'project_name', label: 'Project Name' },
+      { key: 'company', label: 'Company' },
+      { key: 'status', label: 'Status' },
+      { key: 'lab', label: 'Lab' },
+      { key: 'application_type', label: 'Application Type' },
+      { key: 'sales_rep', label: 'Sales Rep' },
+      { key: 'urgent', label: 'Urgent' },
+      { key: 'tags', label: 'Tags' },
+      { key: 'submitted_date', label: 'Submitted' },
+    ]);
+    toast.success(`Exported ${rows.length} project${rows.length === 1 ? '' : 's'}`);
+  }
+
   const rangeStart = totalCount === 0 ? 0 : page * PAGE_SIZE + 1;
   const rangeEnd = Math.min(totalCount, page * PAGE_SIZE + projects.length);
 
@@ -249,15 +314,23 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Projects</h1>
-        <button
-          onClick={() => {
-            setEditing(null);
-            setShowForm(true);
-          }}
-          className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-        >
-          <Plus className="h-4 w-4" /> New Project
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExport}
+            className="flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Download className="h-4 w-4" /> Export CSV
+          </button>
+          <button
+            onClick={() => {
+              setEditing(null);
+              setShowForm(true);
+            }}
+            className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+          >
+            <Plus className="h-4 w-4" /> New Project
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -312,11 +385,29 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
             <option value="asc">Oldest first</option>
           </FilterSelect>
         </div>
-        <p className="text-sm text-gray-500">
-          {totalCount === 0
-            ? '0 projects'
-            : `Showing ${rangeStart}–${rangeEnd} of ${totalCount} projects`}
-        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-gray-500">
+            {totalCount === 0
+              ? '0 projects'
+              : `Showing ${rangeStart}–${rangeEnd} of ${totalCount} projects`}
+          </p>
+          <div className="inline-flex rounded-md border border-gray-300 bg-white p-0.5">
+            <ViewToggleButton
+              active={view === 'list'}
+              onClick={() => changeView('list')}
+              label="List view"
+            >
+              <List className="h-4 w-4" />
+            </ViewToggleButton>
+            <ViewToggleButton
+              active={view === 'grid'}
+              onClick={() => changeView('grid')}
+              label="Grid view"
+            >
+              <LayoutGrid className="h-4 w-4" />
+            </ViewToggleButton>
+          </div>
+        </div>
       </div>
 
       {loading ? (
@@ -334,28 +425,69 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
         />
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {projects.map((p) => (
-              <ProjectCard
-                key={p.id}
-                project={p}
-                labName={p.lab_id ? labMap.get(p.lab_id) ?? '—' : '—'}
-                appTypeName={p.application_type_id ? appTypes.get(p.application_type_id) ?? '—' : '—'}
-                salesRepName={p.sales_rep_id ? salesReps.get(p.sales_rep_id) ?? '—' : '—'}
-                assignedUsers={(assignments.get(p.id) ?? [])
-                  .map((id) => users.get(id))
-                  .filter((u): u is UserProfile => !!u)}
-                fileCount={fileCounts.get(p.id) ?? 0}
-                onOpen={() => onOpenProject(p.id)}
-                onEdit={() => {
-                  setEditing(p);
-                  setShowForm(true);
-                }}
-                onDelete={() => setDeleting(p)}
-                onStatusChange={(s) => changeStatus(p, s)}
-              />
-            ))}
-          </div>
+          {view === 'grid' ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {projects.map((p) => (
+                <ProjectCard
+                  key={p.id}
+                  project={p}
+                  labName={p.lab_id ? labMap.get(p.lab_id) ?? '—' : '—'}
+                  appTypeName={p.application_type_id ? appTypes.get(p.application_type_id) ?? '—' : '—'}
+                  salesRepName={p.sales_rep_id ? salesReps.get(p.sales_rep_id) ?? '—' : '—'}
+                  assignedUsers={(assignments.get(p.id) ?? [])
+                    .map((id) => users.get(id))
+                    .filter((u): u is UserProfile => !!u)}
+                  fileCount={fileCounts.get(p.id) ?? 0}
+                  onOpen={() => onOpenProject(p.id)}
+                  onEdit={() => {
+                    setEditing(p);
+                    setShowForm(true);
+                  }}
+                  onDelete={() => setDeleting(p)}
+                  onStatusChange={(s) => changeStatus(p, s)}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 text-sm">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <ListTh>Project</ListTh>
+                      <ListTh className="hidden sm:table-cell">Company</ListTh>
+                      <ListTh>Status</ListTh>
+                      <ListTh className="hidden md:table-cell">Lab</ListTh>
+                      <ListTh className="hidden lg:table-cell">Assigned</ListTh>
+                      <ListTh className="hidden xl:table-cell">Files</ListTh>
+                      <ListTh className="hidden lg:table-cell">Submitted</ListTh>
+                      <ListTh className="text-right">Actions</ListTh>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {projects.map((p) => (
+                      <ProjectListRow
+                        key={p.id}
+                        project={p}
+                        labName={p.lab_id ? labMap.get(p.lab_id) ?? '—' : '—'}
+                        assignedUsers={(assignments.get(p.id) ?? [])
+                          .map((id) => users.get(id))
+                          .filter((u): u is UserProfile => !!u)}
+                        fileCount={fileCounts.get(p.id) ?? 0}
+                        onOpen={() => onOpenProject(p.id)}
+                        onEdit={() => {
+                          setEditing(p);
+                          setShowForm(true);
+                        }}
+                        onDelete={() => setDeleting(p)}
+                        onStatusChange={(s) => changeStatus(p, s)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center justify-between">
             <span className="text-sm text-gray-500">
@@ -449,6 +581,165 @@ function FilterSelect({
         {children}
       </select>
     </label>
+  );
+}
+
+function ViewToggleButton({
+  active,
+  onClick,
+  label,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={`flex items-center justify-center rounded p-1.5 transition ${
+        active ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ListTh({
+  children,
+  className = '',
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <th
+      className={`px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500 ${className}`}
+    >
+      {children}
+    </th>
+  );
+}
+
+function ProjectListRow({
+  project,
+  labName,
+  assignedUsers,
+  fileCount,
+  onOpen,
+  onEdit,
+  onDelete,
+  onStatusChange,
+}: {
+  project: Project;
+  labName: string;
+  assignedUsers: UserProfile[];
+  fileCount: number;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onStatusChange: (s: ProjectStatus) => void;
+}) {
+  const visible = assignedUsers.slice(0, 3);
+  const overflow = assignedUsers.length - visible.length;
+  return (
+    <tr onClick={onOpen} className="cursor-pointer hover:bg-gray-50">
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          <FolderKanban className="h-4 w-4 flex-shrink-0 text-gray-400" />
+          <span className="font-medium text-gray-900">{project.project_name}</span>
+          {project.is_urgent && (
+            <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700">
+              <AlertTriangle className="h-3 w-3" /> URGENT
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="hidden px-4 py-3 text-gray-600 sm:table-cell">{project.company}</td>
+      <td className="px-4 py-3">
+        <select
+          value={project.status}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            e.stopPropagation();
+            onStatusChange(e.target.value as ProjectStatus);
+          }}
+          className={`rounded-full border px-2 py-0.5 text-xs font-medium ${getStatusColor(
+            project.status
+          )}`}
+        >
+          {PROJECT_STATUSES.map((s) => (
+            <option key={s} value={s}>
+              {formatStatusLabel(s)}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td className="hidden px-4 py-3 text-gray-600 md:table-cell">{labName}</td>
+      <td className="hidden px-4 py-3 lg:table-cell">
+        {assignedUsers.length > 0 ? (
+          <div className="flex -space-x-2">
+            {visible.map((u) => (
+              <span
+                key={u.id}
+                title={u.display_name || u.email}
+                className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-blue-100 text-[9px] font-semibold text-blue-700"
+              >
+                {getInitials(u.display_name || u.email)}
+              </span>
+            ))}
+            {overflow > 0 && (
+              <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-gray-200 text-[9px] font-semibold text-gray-600">
+                +{overflow}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-gray-300">—</span>
+        )}
+      </td>
+      <td className="hidden px-4 py-3 text-gray-500 xl:table-cell">
+        {fileCount > 0 ? (
+          <span className="flex items-center gap-1">
+            <Paperclip className="h-3.5 w-3.5" />
+            {fileCount}
+          </span>
+        ) : (
+          <span className="text-gray-300">—</span>
+        )}
+      </td>
+      <td className="hidden px-4 py-3 text-gray-500 lg:table-cell">
+        {formatDate(project.submitted_date, false)}
+      </td>
+      <td className="px-4 py-3">
+        <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit();
+            }}
+            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-blue-600"
+            title="Edit"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-red-600"
+            title="Delete"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }
 
