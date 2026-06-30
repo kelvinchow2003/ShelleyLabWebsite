@@ -9,8 +9,10 @@ import { useState } from 'react';
 //
 // If a file is missing, the component gracefully falls back to a built-in SVG
 // recreation so the UI is never broken.
-const ICON_SRC = '/shelley-icon.jpg';
-const WORDMARK_SRC = '/shelley-title.jpg';
+// Icon: tightly-cropped PNG from `npm run crop-logos` (used in the square login spot).
+const ICON_SRC = '/shelley-icon.png';
+// Wordmark: high-res horizontal lockup used in the nav bar.
+const WORDMARK_SRC = '/shelley_logo_cmyk.webp';
 
 const BLUE = '#3f6fa6';
 const GREY = '#a6a8ab';

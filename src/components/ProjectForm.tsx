@@ -3,6 +3,7 @@ import { Loader2, Plus, X, Upload, Download, Trash2 } from 'lucide-react';
 import { Modal } from './Modal';
 import { supabase, PROJECT_FILES_BUCKET } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import {
   getOrCreateApplicationType,
   getOrCreateSalesRep,
@@ -35,6 +36,7 @@ export function ProjectForm({
   onSaved: () => void;
 }) {
   const { user } = useAuth();
+  const toast = useToast();
   const isEdit = !!project;
 
   const [labs, setLabs] = useState<Lab[]>([]);
@@ -272,10 +274,13 @@ export function ProjectForm({
         await uploadFiles(projectId, queuedFiles);
       }
 
+      toast.success(isEdit ? 'Project updated' : 'Project created');
       onSaved();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save project');
+      const msg = err instanceof Error ? err.message : 'Failed to save project';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setSubmitting(false);
     }

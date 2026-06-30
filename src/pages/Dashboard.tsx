@@ -5,8 +5,8 @@ import {
   Package,
   Plus,
   ListChecks,
-  Loader2,
 } from 'lucide-react';
+import { Skeleton } from '../components/Skeleton';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigation } from '../contexts/NavigationContext';
@@ -35,24 +35,38 @@ export function Dashboard() {
     async function load() {
       if (!user) return;
 
-      // My active projects (assigned to me, pending/in_progress)
+      // My active projects: ones I'm assigned to OR ones I created, pending/in_progress.
       const { data: assignments } = await supabase
         .from('project_assignments')
         .select('project_id')
         .eq('user_id', user.id);
-      const projectIds = (assignments ?? []).map((a) => a.project_id);
+      const assignedIds = (assignments ?? []).map((a) => a.project_id);
 
-      let myProjects: Project[] = [];
-      if (projectIds.length) {
-        const { data } = await supabase
+      const [assignedRes, createdRes] = await Promise.all([
+        assignedIds.length
+          ? supabase
+              .from('projects')
+              .select('*')
+              .in('id', assignedIds)
+              .in('status', ['pending', 'in_progress'])
+          : Promise.resolve({ data: [] as Project[] }),
+        supabase
           .from('projects')
           .select('*')
-          .in('id', projectIds)
-          .in('status', ['pending', 'in_progress'])
-          .order('submitted_date', { ascending: false })
-          .limit(5);
-        myProjects = data ?? [];
+          .eq('created_by', user.id)
+          .in('status', ['pending', 'in_progress']),
+      ]);
+
+      const merged = new Map<string, Project>();
+      for (const p of [...(assignedRes.data ?? []), ...(createdRes.data ?? [])]) {
+        merged.set(p.id, p);
       }
+      const myProjects = [...merged.values()]
+        .sort(
+          (a, b) =>
+            new Date(b.submitted_date).getTime() - new Date(a.submitted_date).getTime()
+        )
+        .slice(0, 5);
       setProjects(myProjects);
 
       // Active equipment loans (borrowing)
@@ -96,8 +110,13 @@ export function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex justify-center py-20">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+      <div className="space-y-6">
+        <Skeleton className="h-8 w-48" />
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Skeleton className="h-56 w-full" />
+          <Skeleton className="h-56 w-full" />
+        </div>
+        <Skeleton className="h-28 w-full" />
       </div>
     );
   }
@@ -145,9 +164,15 @@ export function Dashboard() {
             </span>
           </div>
           {projects.length === 0 ? (
-            <p className="py-6 text-center text-sm text-gray-400">
-              No active projects assigned to you.
-            </p>
+            <div className="py-6 text-center">
+              <p className="text-sm text-gray-400">No active projects yet.</p>
+              <button
+                onClick={() => navigateTo('projects')}
+                className="mt-3 inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                <Plus className="h-4 w-4" /> New Project
+              </button>
+            </div>
           ) : (
             <ul className="space-y-3">
               {projects.map((p) => (
@@ -187,9 +212,15 @@ export function Dashboard() {
             </span>
           </div>
           {loans.length === 0 ? (
-            <p className="py-6 text-center text-sm text-gray-400">
-              No equipment currently on loan.
-            </p>
+            <div className="py-6 text-center">
+              <p className="text-sm text-gray-400">No equipment currently on loan.</p>
+              <button
+                onClick={() => navigateTo('equipment')}
+                className="mt-3 inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                <Plus className="h-4 w-4" /> New Loan
+              </button>
+            </div>
           ) : (
             <ul className="space-y-3">
               {loans.map((l) => {

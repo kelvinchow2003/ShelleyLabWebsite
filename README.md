@@ -13,16 +13,23 @@ no router library.
 
 ## Features
 
-- **Dashboard** — your active assigned projects, active equipment loans, and an
-  overdue-equipment alert banner, plus quick actions.
-- **Projects** — searchable/filterable/sortable project grid with inline status
-  changes, create/edit modal (tags, assignments, file uploads with client-side
-  image compression), and a project detail overlay.
-- **Equipment Loans** — loans grouped into batches per submission, with
-  return/return-all/delete-batch actions and file attachments.
-- **Activity Log** — paginated, filterable audit trail of all create/update/delete
-  actions.
+- **Dashboard** — active projects you're assigned to **or created**, active
+  equipment loans, an overdue-equipment alert banner, and quick actions.
+- **Projects** — **server-side** searchable/filterable/sortable, paginated project
+  grid with inline status changes, create/edit modal (tags, assignments, file
+  uploads with client-side image compression), and a project detail overlay.
+  Updates appear live across users via Supabase realtime.
+- **Equipment** — two tabs:
+  - **Loans** — loans grouped into batches per submission, with
+    return/return-all/delete-batch actions and file attachments. Returns and
+    deletions restock inventory automatically. Live-updating.
+  - **Catalog** — add/edit/delete equipment and set per-lab quantities; shows
+    "available / total" stock.
+- **Inventory tracking** — loaning decrements available stock (and blocks
+  over-loaning); returning or deleting a loan restocks it.
+- **Activity Log** — paginated, filterable audit trail; card layout on mobile.
 - **Deleted Projects** — soft-deleted projects you can recover.
+- **Toast notifications** for every create/update/delete/return action.
 
 All file access uses **private** Supabase Storage buckets with 1-hour signed URLs.
 
@@ -49,8 +56,10 @@ Open **SQL Editor** in your Supabase dashboard, paste the entire contents of
 
 This creates every table, enables Row Level Security with all policies, adds
 triggers and indexes, seeds the labs (Toronto, Cambridge, Windsor, Vancouver,
-Calgary), and creates the two **private** storage buckets (`project-files`,
-`equipment-loan-files`) with their access policies. It is safe to re-run.
+Calgary), creates the two **private** storage buckets (`project-files`,
+`equipment-loan-files`) with their access policies, and enables **realtime** on
+the `projects` and `equipment_loans` tables (so the live-updating views work). It
+is safe to re-run.
 
 ## 3. Configure environment variables (local)
 
@@ -119,17 +128,49 @@ email-based auth flows.
 
 ---
 
+## Optional: overdue equipment email reminders
+
+A Supabase Edge Function emails contacts whose equipment is past its return date.
+
+1. Create a free [Resend](https://resend.com) account and an API key.
+2. Deploy and configure the function (requires the
+   [Supabase CLI](https://supabase.com/docs/guides/cli)):
+   ```bash
+   supabase functions deploy overdue-reminders
+   supabase secrets set RESEND_API_KEY=re_xxx FROM_EMAIL=lab@yourdomain.com
+   ```
+3. Schedule it: edit `supabase/schedule_overdue_reminders.sql` (fill in your
+   project ref and key) and run it in the SQL Editor. It runs daily at 9am UTC.
+
+If you skip this, the in-app overdue banner and red "Overdue" badges still work —
+you just won't get automated emails.
+
+## Optional: refresh the cropped logo
+
+The nav/login logos load from `public/shelley-icon.png` and
+`public/shelley-title.png`, which are whitespace-trimmed versions of your source
+JPGs. If you replace the source images, regenerate the trimmed PNGs with:
+
+```bash
+npm run crop-logos
+```
+
 ## Project structure
 
 ```
 src/
-  components/   AuthPage, Layout, Modal, Spinner, ProjectForm, ProjectDetail, EquipmentLoanForm
-  contexts/     AuthContext, NavigationContext
-  lib/          supabase.ts, database.types.ts, utils.ts
+  components/   AuthPage, Layout, Logo, Modal, Spinner, Skeleton, Toast (in context),
+                ProjectForm, ProjectDetail, EquipmentLoanForm, EquipmentForm, EquipmentCatalog
+  contexts/     AuthContext, NavigationContext, ToastContext
+  lib/          supabase.ts, database.types.ts, utils.ts, inventory.ts
   pages/        Dashboard, Projects, Equipment, ActivityLog, DeletedProjects
-  App.tsx       state-based navigation shell
+  App.tsx       state-based navigation shell (pages are lazy-loaded / code-split)
   main.tsx      entry point
+public/         logo images (source .jpg + cropped .png)
+scripts/        crop-logos.mjs
 supabase/
-  setup_database.sql   one-paste schema + RLS + storage
+  setup_database.sql              one-paste schema + RLS + storage + realtime
+  functions/overdue-reminders/    Edge Function for overdue emails
+  schedule_overdue_reminders.sql  cron schedule for the function
 vercel.json     SPA rewrite + security headers
 ```

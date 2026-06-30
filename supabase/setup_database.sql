@@ -510,5 +510,20 @@ create policy "equipment_loan_files_storage_delete" on storage.objects
   using (bucket_id = 'equipment-loan-files' and auth.uid() = owner);
 
 -- =============================================================================
+-- REALTIME — enable live updates for the tables the app subscribes to.
+-- =============================================================================
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table public.projects;
+  exception when duplicate_object then null;
+  end;
+  begin
+    alter publication supabase_realtime add table public.equipment_loans;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+-- =============================================================================
 -- Done.
 -- =============================================================================

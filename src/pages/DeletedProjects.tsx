@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Loader2, RotateCcw, Trash2, Inbox } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import { StatusBadge } from '../components/Modal';
 import {
   formatDate,
@@ -20,6 +21,7 @@ type ProjectInsert = Database['public']['Tables']['projects']['Insert'];
 
 export function DeletedProjects() {
   const { user } = useAuth();
+  const toast = useToast();
   const [deleted, setDeleted] = useState<DeletedProject[]>([]);
   const [users, setUsers] = useState<Map<string, UserProfile>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -73,9 +75,10 @@ export function DeletedProjects() {
         project_name: dp.project_name,
       });
       await supabase.from('deleted_projects').delete().eq('id', dp.id);
+      toast.success('Project recovered');
       await loadAll();
     } catch (err) {
-      console.error('Failed to recover project:', err);
+      toast.error(err instanceof Error ? err.message : 'Failed to recover project');
     } finally {
       setRecoveringId(null);
     }

@@ -1,14 +1,12 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Loader2, Plus, Upload, X } from 'lucide-react';
 import { Modal } from './Modal';
 import { supabase, EQUIPMENT_LOAN_FILES_BUCKET } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import {
-  createAdminLog,
-  compressImageIfNeeded,
-  buildStoragePath,
-} from '../lib/utils';
-import type { Lab, Equipment } from '../lib/database.types';
+import { useToast } from '../contexts/ToastContext';
+import { createAdminLog, compressImageIfNeeded, buildStoragePath } from '../lib/utils';
+import { getInventoryMap, adjustInventory } from '../lib/inventory';
+import type { Lab, Equipment, EquipmentInventory } from '../lib/database.types';
 
 const FILE_ACCEPT = 'image/*,.pdf,.doc,.docx';
 
@@ -20,8 +18,10 @@ export function EquipmentLoanForm({
   onSaved: () => void;
 }) {
   const { user } = useAuth();
+  const toast = useToast();
   const [labs, setLabs] = useState<Lab[]>([]);
   const [equipment, setEquipment] = useState<Equipment[]>([]);
+  const [inventory, setInventory] = useState<Map<string, EquipmentInventory>>(new Map());
   const [loading, setLoading] = useState(true);
 
   const [labId, setLabId] = useState('');
@@ -35,7 +35,10 @@ export function EquipmentLoanForm({
   const [files, setFiles] = useState<File[]>([]);
 
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
+
+  async function reloadInventory(equipmentList: Equipment[]) {
+    setInventory(await getInventoryMap(equipmentList.map((e) => e.id)));
+  }
 
   useEffect(() => {
     async function load() {
@@ -44,14 +47,23 @@ export function EquipmentLoanForm({
         supabase.from('equipment').select('*').order('name'),
       ]);
       const loadedLabs = labRes.data ?? [];
+      const loadedEq = eqRes.data ?? [];
       setLabs(loadedLabs);
-      setEquipment(eqRes.data ?? []);
+      setEquipment(loadedEq);
+      await reloadInventory(loadedEq);
       const toronto = loadedLabs.find((l) => l.name === 'Toronto');
       setLabId(toronto?.id ?? loadedLabs[0]?.id ?? '');
       setLoading(false);
     }
     load();
   }, []);
+
+  /** Available units for an equipment at the currently selected lab; null = untracked (unlimited). */
+  function availableFor(equipmentId: string): number | null {
+    if (!labId) return null;
+    const row = inventory.get(`${equipmentId}:${labId}`);
+    return row ? row.quantity_available : null;
+  }
 
   function toggleEquipment(id: string) {
     setSelected((prev) => {
@@ -63,11 +75,10 @@ export function EquipmentLoanForm({
   }
 
   function setQuantity(id: string, qty: number) {
-    setSelected((prev) => {
-      const next = new Map(prev);
-      next.set(id, Math.max(1, qty));
-      return next;
-    });
+    const avail = availableFor(id);
+    let q = Math.max(1, qty);
+    if (avail !== null) q = Math.min(q, Math.max(1, avail));
+    setSelected((prev) => new Map(prev).set(id, q));
   }
 
   async function addNewEquipment() {
@@ -76,7 +87,7 @@ export function EquipmentLoanForm({
     if (!name) return;
     const lab = labId || labs[0]?.id;
     if (!lab) {
-      setError('No lab available to attach new equipment.');
+      toast.error('No lab available to attach new equipment.');
       return;
     }
     const { data, error: insErr } = await supabase
@@ -85,11 +96,13 @@ export function EquipmentLoanForm({
       .select('*')
       .single();
     if (insErr) {
-      setError(`Failed to add equipment: ${insErr.message}`);
+      toast.error(`Failed to add equipment: ${insErr.message}`);
       return;
     }
     if (data) {
-      setEquipment((prev) => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+      const next = [...equipment, data].sort((a, b) => a.name.localeCompare(b.name));
+      setEquipment(next);
+      await reloadInventory(next);
       setSelected((prev) => new Map(prev).set(data.id, 1));
       setNewEquipName('');
     }
@@ -101,17 +114,27 @@ export function EquipmentLoanForm({
     e.target.value = '';
   }
 
+  const overLimit = useMemo(() => {
+    for (const [id, qty] of selected) {
+      const avail = availableFor(id);
+      if (avail !== null && qty > avail) return true;
+    }
+    return false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, inventory, labId]);
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!user) return;
-    setError('');
-    if (!expectedReturn) return setError('Expected return date is required');
-    if (!contactName.trim()) return setError('Contact name is required');
-    if (selected.size === 0) return setError('Select at least one piece of equipment');
+    if (!expectedReturn) return toast.error('Expected return date is required');
+    if (!contactName.trim()) return toast.error('Contact name is required');
+    if (selected.size === 0)
+      return toast.error('Select at least one piece of equipment');
+    if (overLimit)
+      return toast.error('One or more items exceed available stock at this lab');
 
     setSubmitting(true);
     try {
-      // Same created_at across the batch so they group together.
       const createdAt = new Date().toISOString();
       const rows = [...selected.entries()].map(([equipmentId, qty]) => ({
         equipment_id: equipmentId,
@@ -132,10 +155,14 @@ export function EquipmentLoanForm({
         .select('id');
       if (insErr) throw insErr;
 
+      // Decrement inventory for each loaned item.
+      for (const [equipmentId, qty] of selected) {
+        await adjustInventory(equipmentId, labId || null, -qty);
+      }
+
       const loanIds = (inserted ?? []).map((r) => r.id);
       const leadLoanId = loanIds[0];
 
-      // Attach files to the first (lead) loan.
       if (leadLoanId && files.length) {
         for (const raw of files) {
           const file = await compressImageIfNeeded(raw);
@@ -154,17 +181,19 @@ export function EquipmentLoanForm({
         }
       }
 
-      // Audit log per loan.
       for (const id of loanIds) {
         await createAdminLog(user.id, 'created', 'equipment_loan', id, {
           contact_name: contactName.trim(),
         });
       }
 
+      toast.success(
+        `Loaned ${loanIds.length} item${loanIds.length === 1 ? '' : 's'} to ${contactName.trim()}`
+      );
       onSaved();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create loan');
+      toast.error(err instanceof Error ? err.message : 'Failed to create loan');
     } finally {
       setSubmitting(false);
     }
@@ -182,7 +211,7 @@ export function EquipmentLoanForm({
       <button
         type="submit"
         form="loan-form"
-        disabled={submitting}
+        disabled={submitting || overLimit}
         className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
       >
         {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -270,7 +299,6 @@ export function EquipmentLoanForm({
             </div>
           </div>
 
-          {/* Equipment picker */}
           <div>
             <label className="mb-1 block text-sm font-medium text-gray-700">Equipment</label>
             <div className="mb-2 flex gap-2">
@@ -302,24 +330,37 @@ export function EquipmentLoanForm({
               )}
               {equipment.map((eq) => {
                 const checked = selected.has(eq.id);
+                const avail = availableFor(eq.id);
+                const soldOut = avail !== null && avail <= 0 && !checked;
                 return (
                   <div
                     key={eq.id}
                     className="flex items-center justify-between rounded px-1 py-1 hover:bg-gray-50"
                   >
-                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                    <label
+                      className={`flex items-center gap-2 text-sm ${soldOut ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                    >
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={soldOut}
                         onChange={() => toggleEquipment(eq.id)}
                         className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                       />
                       <span className="text-gray-700">{eq.name}</span>
+                      {avail !== null && (
+                        <span
+                          className={`text-xs ${avail <= 0 ? 'text-red-500' : 'text-gray-400'}`}
+                        >
+                          ({avail} available)
+                        </span>
+                      )}
                     </label>
                     {checked && (
                       <input
                         type="number"
                         min={1}
+                        max={avail ?? undefined}
                         value={selected.get(eq.id) ?? 1}
                         onChange={(e) => setQuantity(eq.id, Number(e.target.value))}
                         className="w-16 rounded border border-gray-300 px-2 py-1 text-sm"
@@ -347,7 +388,13 @@ export function EquipmentLoanForm({
             </div>
           )}
 
-          {/* Files */}
+          {overLimit && (
+            <p className="text-sm text-red-600">
+              One or more items exceed the available stock at this lab. Lower the
+              quantity or pick a different lab.
+            </p>
+          )}
+
           <div>
             <label className="mb-1 block text-sm font-medium text-gray-700">Attachments</label>
             <label className="flex w-fit cursor-pointer items-center gap-2 rounded-md border border-dashed border-gray-300 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50">
@@ -375,8 +422,6 @@ export function EquipmentLoanForm({
               </ul>
             )}
           </div>
-
-          {error && <p className="text-sm text-red-600">{error}</p>}
         </form>
       )}
     </Modal>

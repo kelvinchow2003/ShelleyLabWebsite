@@ -1,23 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Plus,
-  Loader2,
   Download,
   Trash2,
   CheckCircle2,
   Clock,
   AlertTriangle,
   Package,
+  Loader2,
 } from 'lucide-react';
 import { supabase, EQUIPMENT_LOAN_FILES_BUCKET } from '../lib/supabase';
 import { EquipmentLoanForm } from '../components/EquipmentLoanForm';
+import { EquipmentCatalog } from '../components/EquipmentCatalog';
 import { Modal } from '../components/Modal';
-import {
-  formatDate,
-  getStatusColor,
-  isLoanOverdue,
-  getSignedUrl,
-} from '../lib/utils';
+import { RowsSkeleton, EmptyState } from '../components/Skeleton';
+import { useToast } from '../contexts/ToastContext';
+import { formatDate, getStatusColor, isLoanOverdue, getSignedUrl } from '../lib/utils';
+import { adjustInventory } from '../lib/inventory';
 import type {
   EquipmentLoan,
   EquipmentLoanFile,
@@ -48,6 +47,50 @@ function effectiveStatus(loan: EquipmentLoan): LoanStatus {
 }
 
 export function Equipment() {
+  const toast = useToast();
+  const [tab, setTab] = useState<'loans' | 'catalog'>('loans');
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold text-gray-900">Equipment</h1>
+        <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1 shadow-sm">
+          <TabButton active={tab === 'loans'} onClick={() => setTab('loans')}>
+            Loans
+          </TabButton>
+          <TabButton active={tab === 'catalog'} onClick={() => setTab('catalog')}>
+            Catalog
+          </TabButton>
+        </div>
+      </div>
+
+      {tab === 'loans' ? <LoansView toast={toast} /> : <EquipmentCatalog />}
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-md px-4 py-1.5 text-sm font-medium transition ${
+        active ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function LoansView({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [loans, setLoans] = useState<LoanWithMeta[]>([]);
   const [filesByLoan, setFilesByLoan] = useState<Map<string, EquipmentLoanFile[]>>(
     new Map()
@@ -63,7 +106,6 @@ export function Equipment() {
   const [labFilter, setLabFilter] = useState('all');
 
   async function loadAll() {
-    setLoading(true);
     const [loanRes, labRes] = await Promise.all([
       supabase.from('equipment_loans').select('*').order('created_at', { ascending: false }),
       supabase.from('labs').select('*').order('name'),
@@ -111,6 +153,19 @@ export function Equipment() {
 
   useEffect(() => {
     loadAll();
+    // Realtime: refresh whenever loans change anywhere.
+    const channel = supabase
+      .channel('equipment_loans_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'equipment_loans' },
+        () => loadAll()
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const batches = useMemo<Batch[]>(() => {
@@ -153,57 +208,111 @@ export function Equipment() {
     });
   }
 
-  async function returnLoans(ids: string[]) {
-    if (ids.length === 0) return;
+  async function returnLoans(targets: LoanWithMeta[]) {
+    if (targets.length === 0) return;
     setBusy(true);
-    const today = new Date().toISOString().slice(0, 10);
-    await supabase
-      .from('equipment_loans')
-      .update({ status: 'returned', actual_return_date: today })
-      .in('id', ids);
-    setBusy(false);
-    await loadAll();
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      await supabase
+        .from('equipment_loans')
+        .update({ status: 'returned', actual_return_date: today })
+        .in(
+          'id',
+          targets.map((t) => t.id)
+        );
+      // Restock inventory for each returned item.
+      for (const t of targets) {
+        await adjustInventory(t.equipment_id, t.lab_id, t.quantity_borrowed);
+      }
+      toast.success(
+        `Returned ${targets.length} item${targets.length === 1 ? '' : 's'}`
+      );
+      await loadAll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to return items');
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function returnSelectedInBatch(batch: Batch) {
-    const ids = batch.loans
-      .filter((l) => selectedIds.has(l.id) && effectiveStatus(l) !== 'returned')
-      .map((l) => l.id);
-    await returnLoans(ids);
+    await returnLoans(
+      batch.loans.filter(
+        (l) => selectedIds.has(l.id) && effectiveStatus(l) !== 'returned'
+      )
+    );
   }
 
   async function returnAllInBatch(batch: Batch) {
-    const ids = batch.loans
-      .filter((l) => effectiveStatus(l) !== 'returned')
-      .map((l) => l.id);
-    await returnLoans(ids);
+    await returnLoans(batch.loans.filter((l) => effectiveStatus(l) !== 'returned'));
   }
 
   async function confirmDeleteBatch() {
     if (!deletingBatch) return;
     setBusy(true);
-    const loanIds = deletingBatch.loans.map((l) => l.id);
-    // Delete files from storage first.
-    const paths = deletingBatch.files.map((f) => f.file_path);
-    if (paths.length) {
-      await supabase.storage.from(EQUIPMENT_LOAN_FILES_BUCKET).remove(paths);
+    try {
+      const loanIds = deletingBatch.loans.map((l) => l.id);
+      const paths = deletingBatch.files.map((f) => f.file_path);
+      if (paths.length) {
+        await supabase.storage.from(EQUIPMENT_LOAN_FILES_BUCKET).remove(paths);
+      }
+      await supabase.from('equipment_loan_files').delete().in('loan_id', loanIds);
+      // Restock any items that were still out before deleting.
+      for (const l of deletingBatch.loans) {
+        if (effectiveStatus(l) !== 'returned') {
+          await adjustInventory(l.equipment_id, l.lab_id, l.quantity_borrowed);
+        }
+      }
+      await supabase.from('equipment_loans').delete().in('id', loanIds);
+      toast.success('Loan batch deleted');
+      setDeletingBatch(null);
+      await loadAll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete batch');
+    } finally {
+      setBusy(false);
     }
-    await supabase.from('equipment_loan_files').delete().in('loan_id', loanIds);
-    await supabase.from('equipment_loans').delete().in('id', loanIds);
-    setBusy(false);
-    setDeletingBatch(null);
-    await loadAll();
   }
 
   async function downloadFile(file: EquipmentLoanFile) {
     const url = await getSignedUrl(EQUIPMENT_LOAN_FILES_BUCKET, file.file_path);
     if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    else toast.error('Could not generate download link');
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Equipment Loans</h1>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap gap-3">
+          <label className="text-xs font-medium text-gray-500">
+            Status
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'all' | LoanStatus)}
+              className="mt-1 block rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+            >
+              <option value="all">All</option>
+              <option value="borrowing">Borrowing</option>
+              <option value="returned">Returned</option>
+              <option value="overdue">Overdue</option>
+            </select>
+          </label>
+          <label className="text-xs font-medium text-gray-500">
+            Lab
+            <select
+              value={labFilter}
+              onChange={(e) => setLabFilter(e.target.value)}
+              className="mt-1 block rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+            >
+              <option value="all">All labs</option>
+              {labs.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <button
           onClick={() => setShowForm(true)}
           className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
@@ -212,46 +321,16 @@ export function Equipment() {
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-        <label className="text-xs font-medium text-gray-500">
-          Status
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as 'all' | LoanStatus)}
-            className="mt-1 block rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-          >
-            <option value="all">All</option>
-            <option value="borrowing">Borrowing</option>
-            <option value="returned">Returned</option>
-            <option value="overdue">Overdue</option>
-          </select>
-        </label>
-        <label className="text-xs font-medium text-gray-500">
-          Lab
-          <select
-            value={labFilter}
-            onChange={(e) => setLabFilter(e.target.value)}
-            className="mt-1 block rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-          >
-            <option value="all">All labs</option>
-            {labs.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
       {loading ? (
-        <div className="flex justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-        </div>
+        <RowsSkeleton count={4} />
       ) : batches.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-gray-300 bg-white py-16 text-center text-gray-400">
-          <Package className="mx-auto mb-2 h-8 w-8 text-gray-300" />
-          No loans match your filters.
-        </div>
+        <EmptyState
+          icon={<Package className="h-8 w-8" />}
+          title="No loans match your filters"
+          description="Create a loan to check equipment out to a contact."
+          actionLabel="New Loan"
+          onAction={() => setShowForm(true)}
+        />
       ) : (
         <div className="space-y-4">
           {batches.map((batch) => {
@@ -266,19 +345,17 @@ export function Equipment() {
                 key={batch.key}
                 className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm"
               >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 className="font-semibold text-gray-900">{batch.contact_name}</h3>
-                    <p className="text-sm text-gray-500">
-                      {[batch.contact_email, batch.contact_phone]
-                        .filter(Boolean)
-                        .join(' · ') || 'No contact info'}
-                    </p>
-                    <p className="mt-1 text-xs text-gray-400">
-                      Loaned on {formatDate(batch.created_at)} · {batch.loans.length}{' '}
-                      item{batch.loans.length === 1 ? '' : 's'}
-                    </p>
-                  </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">{batch.contact_name}</h3>
+                  <p className="text-sm text-gray-500">
+                    {[batch.contact_email, batch.contact_phone]
+                      .filter(Boolean)
+                      .join(' · ') || 'No contact info'}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Loaned on {formatDate(batch.created_at)} · {batch.loans.length} item
+                    {batch.loans.length === 1 ? '' : 's'}
+                  </p>
                 </div>
 
                 <ul className="mt-4 divide-y divide-gray-100 border-y border-gray-100">
@@ -402,7 +479,7 @@ export function Equipment() {
           <p className="text-sm text-gray-700">
             Delete this entire loan batch for{' '}
             <strong>{deletingBatch.contact_name}</strong> ({deletingBatch.loans.length}{' '}
-            items) and its attached files? This cannot be undone.
+            items) and its attached files? Items still on loan will be restocked.
           </p>
         </Modal>
       )}

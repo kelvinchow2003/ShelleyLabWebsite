@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { RowsSkeleton } from '../components/Skeleton';
 import { formatDate } from '../lib/utils';
 import type { AdminLog, UserProfile } from '../lib/database.types';
 
@@ -149,12 +150,49 @@ export function ActivityLog() {
       </div>
 
       {loading ? (
-        <div className="flex justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-        </div>
+        <RowsSkeleton count={8} />
       ) : (
         <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-          <div className="overflow-x-auto">
+          {/* Mobile: card layout */}
+          <div className="divide-y divide-gray-100 md:hidden">
+            {pageRows.length === 0 ? (
+              <p className="px-4 py-10 text-center text-gray-400">
+                No activity matches your filters.
+              </p>
+            ) : (
+              pageRows.map((log) => {
+                const u = log.user_id ? users.get(log.user_id) : null;
+                return (
+                  <div key={log.id} className="space-y-1 px-4 py-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-gray-800">
+                        {u ? u.display_name || u.email : 'System'}
+                      </span>
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${actionColor(
+                          log.action
+                        )}`}
+                      >
+                        {log.action}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      {log.entity_type}
+                      {log.entity_id && (
+                        <span className="ml-1 font-mono text-gray-400">
+                          · {log.entity_id.slice(0, 8)}…
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-gray-400">{formatDate(log.created_at)}</p>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Desktop: table */}
+          <div className="hidden overflow-x-auto md:block">
             <table className="min-w-full divide-y divide-gray-200 text-sm">
               <thead className="bg-gray-50">
                 <tr>

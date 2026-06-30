@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Plus,
   Search,
@@ -6,12 +6,16 @@ import {
   Pencil,
   Trash2,
   Paperclip,
-  Loader2,
+  ChevronLeft,
+  ChevronRight,
+  FolderKanban,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import { ProjectForm } from '../components/ProjectForm';
 import { Modal } from '../components/Modal';
+import { CardGridSkeleton, EmptyState } from '../components/Skeleton';
 import {
   PROJECT_STATUSES,
   formatStatusLabel,
@@ -25,29 +29,47 @@ import type {
   Lab,
   UserProfile,
   ProjectStatus,
+  ProjectTag,
 } from '../lib/database.types';
 
 type SortKey = 'submitted_date' | 'title' | 'status' | 'priority';
+const PAGE_SIZE = 12;
+
+const SORT_COLUMN: Record<SortKey, string> = {
+  submitted_date: 'submitted_date',
+  title: 'project_name',
+  status: 'status',
+  priority: 'is_urgent',
+};
 
 export function Projects({ onOpenProject }: { onOpenProject: (id: string) => void }) {
   const { user } = useAuth();
-  const [projects, setProjects] = useState<Project[]>([]);
+  const toast = useToast();
+
+  // Reference data (loaded once).
   const [labs, setLabs] = useState<Lab[]>([]);
+  const [labMap, setLabMap] = useState<Map<string, string>>(new Map());
   const [appTypes, setAppTypes] = useState<Map<string, string>>(new Map());
   const [salesReps, setSalesReps] = useState<Map<string, string>>(new Map());
-  const [labMap, setLabMap] = useState<Map<string, string>>(new Map());
   const [users, setUsers] = useState<Map<string, UserProfile>>(new Map());
+  const [tags, setTags] = useState<ProjectTag[]>([]);
+
+  // Current page data.
+  const [projects, setProjects] = useState<Project[]>([]);
   const [assignments, setAssignments] = useState<Map<string, string[]>>(new Map());
   const [fileCounts, setFileCounts] = useState<Map<string, number>>(new Map());
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
+  // Modals.
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Project | null>(null);
   const [deleting, setDeleting] = useState<Project | null>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
 
-  // Filters
+  // Filters.
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | ProjectStatus>('all');
   const [labFilter, setLabFilter] = useState('all');
   const [priorityFilter, setPriorityFilter] = useState<'all' | 'urgent' | 'not-urgent'>(
@@ -56,109 +78,139 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
   const [tagFilter, setTagFilter] = useState('all');
   const [sortKey, setSortKey] = useState<SortKey>('submitted_date');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+  const [page, setPage] = useState(0);
 
-  async function loadAll() {
-    setLoading(true);
-    const [projRes, labRes, appRes, repRes, userRes, assignRes, fileRes] =
-      await Promise.all([
-        supabase.from('projects').select('*'),
+  // Debounce the search input.
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSearch(search), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+
+  // Load reference data once.
+  useEffect(() => {
+    async function loadRefs() {
+      const [labRes, appRes, repRes, userRes, tagRes] = await Promise.all([
         supabase.from('labs').select('*').order('name'),
         supabase.from('application_types').select('id,name'),
         supabase.from('sales_reps').select('id,name'),
         supabase.from('user_profiles').select('*'),
-        supabase.from('project_assignments').select('project_id,user_id'),
-        supabase.from('project_files').select('project_id'),
+        supabase.from('project_tags').select('*').order('name'),
       ]);
-
-    setProjects(projRes.data ?? []);
-    setLabs(labRes.data ?? []);
-    setLabMap(new Map((labRes.data ?? []).map((l) => [l.id, l.name])));
-    setAppTypes(new Map((appRes.data ?? []).map((a) => [a.id, a.name])));
-    setSalesReps(new Map((repRes.data ?? []).map((r) => [r.id, r.name])));
-    setUsers(new Map((userRes.data ?? []).map((u) => [u.id, u])));
-
-    const assignMap = new Map<string, string[]>();
-    for (const a of assignRes.data ?? []) {
-      const arr = assignMap.get(a.project_id) ?? [];
-      arr.push(a.user_id);
-      assignMap.set(a.project_id, arr);
+      setLabs(labRes.data ?? []);
+      setLabMap(new Map((labRes.data ?? []).map((l) => [l.id, l.name])));
+      setAppTypes(new Map((appRes.data ?? []).map((a) => [a.id, a.name])));
+      setSalesReps(new Map((repRes.data ?? []).map((r) => [r.id, r.name])));
+      setUsers(new Map((userRes.data ?? []).map((u) => [u.id, u])));
+      setTags(tagRes.data ?? []);
     }
-    setAssignments(assignMap);
-
-    const counts = new Map<string, number>();
-    for (const f of fileRes.data ?? []) {
-      counts.set(f.project_id, (counts.get(f.project_id) ?? 0) + 1);
-    }
-    setFileCounts(counts);
-
-    setLoading(false);
-  }
-
-  useEffect(() => {
-    loadAll();
+    loadRefs();
   }, []);
 
-  const allTags = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of projects) for (const t of p.tags) set.add(t);
-    return [...set].sort();
-  }, [projects]);
+  const loadPage = useCallback(async () => {
+    setLoading(true);
+    let query = supabase.from('projects').select('*', { count: 'exact' });
 
-  const filtered = useMemo(() => {
-    let result = projects.filter((p) => {
-      if (statusFilter !== 'all' && p.status !== statusFilter) return false;
-      if (labFilter !== 'all' && p.lab_id !== labFilter) return false;
-      if (priorityFilter === 'urgent' && !p.is_urgent) return false;
-      if (priorityFilter === 'not-urgent' && p.is_urgent) return false;
-      if (tagFilter !== 'all' && !p.tags.includes(tagFilter)) return false;
-      if (search.trim()) {
-        const q = search.toLowerCase();
-        const hay = `${p.project_name} ${p.company} ${p.description}`.toLowerCase();
-        if (!hay.includes(q)) return false;
+    if (statusFilter !== 'all') query = query.eq('status', statusFilter);
+    if (labFilter !== 'all') query = query.eq('lab_id', labFilter);
+    if (priorityFilter === 'urgent') query = query.eq('is_urgent', true);
+    if (priorityFilter === 'not-urgent') query = query.eq('is_urgent', false);
+    if (tagFilter !== 'all') query = query.contains('tags', [tagFilter]);
+    if (debouncedSearch.trim()) {
+      const q = debouncedSearch.trim().replace(/[%,]/g, ' ');
+      query = query.or(
+        `project_name.ilike.%${q}%,company.ilike.%${q}%,description.ilike.%${q}%`
+      );
+    }
+
+    query = query
+      .order(SORT_COLUMN[sortKey], { ascending: sortOrder === 'asc' })
+      .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+
+    const { data, count, error } = await query;
+    if (error) {
+      toast.error(error.message);
+      setLoading(false);
+      return;
+    }
+    const rows = data ?? [];
+    setProjects(rows);
+    setTotalCount(count ?? 0);
+
+    // Load assignments + file counts for just this page.
+    const ids = rows.map((r) => r.id);
+    if (ids.length) {
+      const [assignRes, fileRes] = await Promise.all([
+        supabase.from('project_assignments').select('project_id,user_id').in('project_id', ids),
+        supabase.from('project_files').select('project_id').in('project_id', ids),
+      ]);
+      const assignMap = new Map<string, string[]>();
+      for (const a of assignRes.data ?? []) {
+        const arr = assignMap.get(a.project_id) ?? [];
+        arr.push(a.user_id);
+        assignMap.set(a.project_id, arr);
       }
-      return true;
-    });
-
-    result = [...result].sort((a, b) => {
-      let cmp = 0;
-      switch (sortKey) {
-        case 'title':
-          cmp = a.project_name.localeCompare(b.project_name);
-          break;
-        case 'status':
-          cmp = a.status.localeCompare(b.status);
-          break;
-        case 'priority':
-          cmp = Number(a.is_urgent) - Number(b.is_urgent);
-          break;
-        case 'submitted_date':
-        default:
-          cmp =
-            new Date(a.submitted_date).getTime() -
-            new Date(b.submitted_date).getTime();
-          break;
+      setAssignments(assignMap);
+      const counts = new Map<string, number>();
+      for (const f of fileRes.data ?? []) {
+        counts.set(f.project_id, (counts.get(f.project_id) ?? 0) + 1);
       }
-      return sortOrder === 'desc' ? -cmp : cmp;
-    });
+      setFileCounts(counts);
+    } else {
+      setAssignments(new Map());
+      setFileCounts(new Map());
+    }
+    setLoading(false);
+  }, [
+    statusFilter,
+    labFilter,
+    priorityFilter,
+    tagFilter,
+    debouncedSearch,
+    sortKey,
+    sortOrder,
+    page,
+    toast,
+  ]);
 
-    return result;
-  }, [projects, statusFilter, labFilter, priorityFilter, tagFilter, search, sortKey, sortOrder]);
+  // Reset to first page when filters change.
+  useEffect(() => {
+    setPage(0);
+  }, [statusFilter, labFilter, priorityFilter, tagFilter, debouncedSearch, sortKey, sortOrder]);
+
+  useEffect(() => {
+    loadPage();
+  }, [loadPage]);
+
+  // Realtime: refresh the current page when projects change.
+  useEffect(() => {
+    const channel = supabase
+      .channel('projects_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'projects' },
+        () => loadPage()
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [loadPage]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
   async function changeStatus(p: Project, status: ProjectStatus) {
-    const { error } = await supabase
-      .from('projects')
-      .update({ status })
-      .eq('id', p.id);
-    if (!error) {
-      setProjects((prev) =>
-        prev.map((x) => (x.id === p.id ? { ...x, status } : x))
-      );
-      if (user) {
-        await createAdminLog(user.id, 'updated', 'project', p.id, {
-          status: { before: p.status, after: status },
-        });
-      }
+    const { error } = await supabase.from('projects').update({ status }).eq('id', p.id);
+    if (error) {
+      toast.error(error.message);
+      return;
     }
+    setProjects((prev) => prev.map((x) => (x.id === p.id ? { ...x, status } : x)));
+    if (user) {
+      await createAdminLog(user.id, 'updated', 'project', p.id, {
+        status: { before: p.status, after: status },
+      });
+    }
+    toast.success(`Status set to ${formatStatusLabel(status)}`);
   }
 
   async function confirmDelete() {
@@ -180,12 +232,18 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
       await createAdminLog(user.id, 'deleted', 'project', deleting.id, {
         project_name: deleting.project_name,
       });
+      toast.success('Project deleted and archived');
       setDeleting(null);
-      await loadAll();
+      await loadPage();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete project');
     } finally {
       setDeletingBusy(false);
     }
   }
+
+  const rangeStart = totalCount === 0 ? 0 : page * PAGE_SIZE + 1;
+  const rangeEnd = Math.min(totalCount, page * PAGE_SIZE + projects.length);
 
   return (
     <div className="space-y-6">
@@ -237,9 +295,9 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
           </FilterSelect>
           <FilterSelect label="Tag" value={tagFilter} onChange={setTagFilter}>
             <option value="all">All tags</option>
-            {allTags.map((t) => (
-              <option key={t} value={t}>
-                {t}
+            {tags.map((t) => (
+              <option key={t.id} value={t.name}>
+                {t.name}
               </option>
             ))}
           </FilterSelect>
@@ -255,48 +313,79 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
           </FilterSelect>
         </div>
         <p className="text-sm text-gray-500">
-          {filtered.length} of {projects.length} projects
+          {totalCount === 0
+            ? '0 projects'
+            : `Showing ${rangeStart}–${rangeEnd} of ${totalCount} projects`}
         </p>
       </div>
 
       {loading ? (
-        <div className="flex justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-gray-300 bg-white py-16 text-center text-gray-400">
-          No projects match your filters.
-        </div>
+        <CardGridSkeleton count={6} />
+      ) : projects.length === 0 ? (
+        <EmptyState
+          icon={<FolderKanban className="h-8 w-8" />}
+          title="No projects match your filters"
+          description="Adjust the filters above or create a new project."
+          actionLabel="New Project"
+          onAction={() => {
+            setEditing(null);
+            setShowForm(true);
+          }}
+        />
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {filtered.map((p) => (
-            <ProjectCard
-              key={p.id}
-              project={p}
-              labName={p.lab_id ? labMap.get(p.lab_id) ?? '—' : '—'}
-              appTypeName={p.application_type_id ? appTypes.get(p.application_type_id) ?? '—' : '—'}
-              salesRepName={p.sales_rep_id ? salesReps.get(p.sales_rep_id) ?? '—' : '—'}
-              assignedUsers={(assignments.get(p.id) ?? [])
-                .map((id) => users.get(id))
-                .filter((u): u is UserProfile => !!u)}
-              fileCount={fileCounts.get(p.id) ?? 0}
-              onOpen={() => onOpenProject(p.id)}
-              onEdit={() => {
-                setEditing(p);
-                setShowForm(true);
-              }}
-              onDelete={() => setDeleting(p)}
-              onStatusChange={(s) => changeStatus(p, s)}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {projects.map((p) => (
+              <ProjectCard
+                key={p.id}
+                project={p}
+                labName={p.lab_id ? labMap.get(p.lab_id) ?? '—' : '—'}
+                appTypeName={p.application_type_id ? appTypes.get(p.application_type_id) ?? '—' : '—'}
+                salesRepName={p.sales_rep_id ? salesReps.get(p.sales_rep_id) ?? '—' : '—'}
+                assignedUsers={(assignments.get(p.id) ?? [])
+                  .map((id) => users.get(id))
+                  .filter((u): u is UserProfile => !!u)}
+                fileCount={fileCounts.get(p.id) ?? 0}
+                onOpen={() => onOpenProject(p.id)}
+                onEdit={() => {
+                  setEditing(p);
+                  setShowForm(true);
+                }}
+                onDelete={() => setDeleting(p)}
+                onStatusChange={(s) => changeStatus(p, s)}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-500">
+              Page {page + 1} of {totalPages}
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="flex items-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+              >
+                <ChevronLeft className="h-4 w-4" /> Prev
+              </button>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1}
+                className="flex items-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+              >
+                Next <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </>
       )}
 
       {showForm && (
         <ProjectForm
           project={editing}
           onClose={() => setShowForm(false)}
-          onSaved={loadAll}
+          onSaved={loadPage}
         />
       )}
 
@@ -319,7 +408,9 @@ export function Projects({ onOpenProject }: { onOpenProject: (id: string) => voi
                 disabled={deletingBusy}
                 className="flex items-center gap-2 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
               >
-                {deletingBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                {deletingBusy && (
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                )}
                 Delete
               </button>
             </>
@@ -444,9 +535,7 @@ function ProjectCard({
             </span>
           ))}
           {project.tags.length > 4 && (
-            <span className="text-[10px] text-gray-400">
-              +{project.tags.length - 4}
-            </span>
+            <span className="text-[10px] text-gray-400">+{project.tags.length - 4}</span>
           )}
         </div>
       )}
