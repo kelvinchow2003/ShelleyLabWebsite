@@ -8,9 +8,9 @@ import {
   LogOut,
   Menu,
   X,
-  FlaskConical,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { ShelleyWordmark } from './Logo';
 import type { PageKey } from '../contexts/NavigationContext';
 
 interface NavItem {
@@ -48,11 +48,14 @@ export function Layout({
     <div className="min-h-screen bg-gray-50">
       <nav className="sticky top-0 z-40 border-b border-gray-200 bg-white shadow-sm">
         <div className="mx-auto max-w-7xl px-4">
-          <div className="flex h-16 items-center justify-between">
-            <div className="flex items-center gap-2">
-              <FlaskConical className="h-6 w-6 text-blue-600" />
-              <span className="text-lg font-bold text-blue-600">ShelleyLab</span>
-            </div>
+          <div className="flex h-20 items-center justify-between">
+            <button
+              onClick={() => go('home')}
+              className="flex items-center gap-2"
+              aria-label="Shelley Automation — Dashboard"
+            >
+              <ShelleyWordmark imgClassName="h-14 w-auto" iconClassName="h-10 w-10" textClassName="text-xl" />
+            </button>
 
             {/* Desktop nav */}
             <div className="hidden items-center gap-1 md:flex">

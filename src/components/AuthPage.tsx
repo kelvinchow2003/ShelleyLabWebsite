@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
-import { FlaskConical, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { ShelleyMark } from './Logo';
 
 export function AuthPage() {
   const [mode, setMode] = useState<'login' | 'signup'>('login');
@@ -9,10 +10,14 @@ export function AuthPage() {
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-gray-100 p-4">
       <div className="w-full max-w-md">
         <div className="mb-8 flex flex-col items-center text-center">
-          <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg">
-            <FlaskConical className="h-7 w-7" />
+          <div className="mb-3 flex h-16 w-16 items-center justify-center rounded-xl bg-white shadow-lg ring-1 ring-gray-100">
+            <ShelleyMark className="h-11 w-11" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">ShelleyAutomationLab</h1>
+          <h1 className="text-2xl font-bold text-gray-900">
+            <span className="text-slate-700">Shelley</span>
+            <span className="font-medium text-gray-400">Automation</span>
+            <span className="ml-1 text-blue-600">Lab</span>
+          </h1>
           <p className="mt-1 text-sm text-gray-500">
             Internal project &amp; equipment management
           </p>
